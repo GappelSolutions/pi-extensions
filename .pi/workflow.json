@@ -1,0 +1,19 @@
+{
+  "commit": {
+    "language": "en",
+    "messageFormat": "${type}(${component}): ${description}",
+    "directCommit": true,
+    "targetBranch": "main",
+    "ticketRequired": false,
+    "ticketPlatform": "none",
+    "platform": "none",
+    "prDescriptionLanguage": "en",
+    "coAuthoredBy": false,
+    "branchFormat": "${type}/${description}",
+    "prReady": false
+  },
+  "vault": "~/dev/codelayer-vault",
+  "lazylink": {
+    "project": "pi"
+  }
+}

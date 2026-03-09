@@ -1,0 +1,14 @@
+{
+  "name": "pi-session-dashboard",
+  "version": "0.1.0",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "latest",
+    "typescript": "^5.9.3"
+  }
+}
