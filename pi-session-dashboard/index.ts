@@ -22,6 +22,7 @@ interface SessionInfo {
   cwd: string;
   timestamp: string;
   id: string;
+  name?: string;
   model?: string;
   entryCount: number;
   lastMessage?: string;
@@ -155,8 +156,28 @@ async function parseSessionHeader(
 
     let lastMessage: string | undefined;
     let model: string | undefined;
+    let name: string | undefined;
     const entryCount = lines.length;
 
+    // Scan first ~20 lines for session_info (name) and model_change
+    for (const line of lines.slice(1, 20)) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type === "session_info" && entry.name) {
+          name = entry.name;
+        }
+        if (entry.type === "session_name" && entry.name) {
+          name = entry.name;
+        }
+        if (entry.type === "model_change" && !model) {
+          model = entry.model;
+        }
+      } catch {
+        // skip
+      }
+    }
+
+    // Scan tail for last user message and late model changes
     const tail = lines.slice(-20);
     for (const line of tail) {
       try {
@@ -168,25 +189,14 @@ async function parseSessionHeader(
               : entry.message.content?.[0]?.text ?? "";
           if (text) lastMessage = text;
         }
-        if (entry.type === "model_change") {
-          model = entry.model;
+        if (entry.type === "session_info" && entry.name) {
+          name = entry.name;
+        }
+        if (entry.type === "session_name" && entry.name) {
+          name = entry.name;
         }
       } catch {
         // skip
-      }
-    }
-
-    if (!model) {
-      for (const line of lines.slice(1, 10)) {
-        try {
-          const entry = JSON.parse(line);
-          if (entry.type === "model_change") {
-            model = entry.model;
-            break;
-          }
-        } catch {
-          // skip
-        }
       }
     }
 
@@ -198,6 +208,7 @@ async function parseSessionHeader(
       cwd,
       timestamp: header.timestamp,
       id: header.id,
+      name,
       model,
       entryCount,
       lastMessage,
@@ -746,9 +757,13 @@ class SessionDashboard implements Component {
       const isFocused = isSelected && this.focusPane === "sessions";
 
       const ts = formatTimestamp(session.timestamp);
-      const model = session.model ? t.fg("muted", ` ${session.model}`) : "";
       const entries = t.fg("dim", ` [${session.entryCount}]`);
-      let line1 = ` ${isSelected ? "▸" : " "} ${ts}${model}${entries}`;
+      const title = session.name
+        ? t.bold(truncateToWidth(session.name, width - 20))
+        : ts;
+      const meta = session.name ? t.fg("muted", ` ${ts}`) : "";
+      const model = session.model ? t.fg("muted", ` ${session.model}`) : "";
+      let line1 = ` ${isSelected ? "▸" : " "} ${title}${meta}${model}${entries}`;
       line1 = truncateToWidth(line1, width);
       line1 = padStr(line1, width);
 
@@ -943,63 +958,54 @@ async function dashboardLoop(
 // ── Extension Entry Point ──────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // Shared dashboard + switch logic. `doSwitch` is only available in command context.
-  async function runDashboard(
-    ui: { custom: any; setWorkingMessage: any; notify: any; confirm: any },
-    doSwitch: ((path: string) => Promise<void>) | null,
-  ): Promise<void> {
-    await dashboardLoop(ui, async (result) => {
-      if (result.type === "create") {
-        const filePath = await createSessionInDir(result.cwd, result.name);
-        ui.notify(`Session created for ${result.project}`, "info");
-        if (doSwitch) {
-          await doSwitch(filePath);
-        }
-      } else if (result.type === "open") {
-        if (doSwitch) {
-          await doSwitch(result.sessionPath);
-        }
-      }
-    });
-  }
+  // Path selected from ctrl+s shortcut — consumed by /sessions command
+  let pendingSwitchPath: string | null = null;
 
-  // ctrl+s shortcut — opens dashboard with session switching
+  // ctrl+s shortcut — opens dashboard, queues switch for /sessions
   pi.registerShortcut("ctrl+s", {
     description: "Open session dashboard",
     handler: async (ctx) => {
       if (!ctx.hasUI) return;
 
-      await dashboardLoop(ctx.ui, async (result) => {
-        let targetPath: string | null = null;
+      // Custom loop: "create" is in-place (stays open), "open" queues switch
+      while (true) {
+        const result = await openDashboard(ctx.ui);
+        if (!result) return; // q/esc
+
+        if (result.type === "open") {
+          pendingSwitchPath = result.sessionPath;
+          ctx.ui.notify(`Type /sessions to switch`, "info");
+          return;
+        }
 
         if (result.type === "create") {
-          targetPath = await createSessionInDir(result.cwd, result.name);
+          const filePath = await createSessionInDir(result.cwd, result.name);
           ctx.ui.notify(`Session created for ${result.project}`, "info");
-        } else if (result.type === "open") {
-          targetPath = result.sessionPath;
+          // Stay in dashboard — re-opens so user can see and select the new session
+          continue;
         }
 
-        if (targetPath) {
-          // switchSession may exist at runtime even though types don't expose it on ExtensionContext
-          const ctxAny = ctx as any;
-          if (typeof ctxAny.switchSession === "function") {
-            await ctxAny.switchSession(targetPath);
-          } else {
-            // Fallback: tell user to use the command
-            ctx.ui.notify(`Use /sessions to switch sessions`, "warning");
-          }
-        }
-      });
+        // In-place actions (delete, archive, addProject)
+        await processInPlaceAction(result, ctx.ui);
+      }
     },
   });
 
-  // /sessions command — full dashboard with session switching
+  // /sessions command — opens dashboard or switches to pending session
   pi.registerCommand("sessions", {
     description: "Browse Pi sessions grouped by project",
 
     handler: async (args, ctx) => {
       if (!ctx.hasUI) {
         ctx.ui.notify("Session dashboard requires a TUI", "warning");
+        return;
+      }
+
+      // Auto-switch if ctrl+s already selected a session
+      if (!args.trim() && pendingSwitchPath) {
+        const path = pendingSwitchPath;
+        pendingSwitchPath = null;
+        await ctx.switchSession(path);
         return;
       }
 
@@ -1010,8 +1016,15 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      await runDashboard(ctx.ui, async (path) => {
-        await ctx.switchSession(path);
+      // Full dashboard
+      await dashboardLoop(ctx.ui, async (result) => {
+        if (result.type === "create") {
+          const filePath = await createSessionInDir(result.cwd, result.name);
+          ctx.ui.notify(`Session created for ${result.project}`, "info");
+          await ctx.switchSession(filePath);
+        } else if (result.type === "open") {
+          await ctx.switchSession(result.sessionPath);
+        }
       });
     },
   });
