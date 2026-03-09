@@ -943,19 +943,51 @@ async function dashboardLoop(
 // ── Extension Entry Point ──────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // ctrl+s shortcut — opens dashboard overlay
+  // Shared dashboard + switch logic. `doSwitch` is only available in command context.
+  async function runDashboard(
+    ui: { custom: any; setWorkingMessage: any; notify: any; confirm: any },
+    doSwitch: ((path: string) => Promise<void>) | null,
+  ): Promise<void> {
+    await dashboardLoop(ui, async (result) => {
+      if (result.type === "create") {
+        const filePath = await createSessionInDir(result.cwd, result.name);
+        ui.notify(`Session created for ${result.project}`, "info");
+        if (doSwitch) {
+          await doSwitch(filePath);
+        }
+      } else if (result.type === "open") {
+        if (doSwitch) {
+          await doSwitch(result.sessionPath);
+        }
+      }
+    });
+  }
+
+  // ctrl+s shortcut — opens dashboard with session switching
   pi.registerShortcut("ctrl+s", {
     description: "Open session dashboard",
     handler: async (ctx) => {
       if (!ctx.hasUI) return;
 
       await dashboardLoop(ctx.ui, async (result) => {
+        let targetPath: string | null = null;
+
         if (result.type === "create") {
-          const filePath = await createSessionInDir(result.cwd, result.name);
+          targetPath = await createSessionInDir(result.cwd, result.name);
           ctx.ui.notify(`Session created for ${result.project}`, "info");
-          pi.sendUserMessage(`/sessions --switch ${filePath}`);
         } else if (result.type === "open") {
-          pi.sendUserMessage(`/sessions --switch ${result.sessionPath}`);
+          targetPath = result.sessionPath;
+        }
+
+        if (targetPath) {
+          // switchSession may exist at runtime even though types don't expose it on ExtensionContext
+          const ctxAny = ctx as any;
+          if (typeof ctxAny.switchSession === "function") {
+            await ctxAny.switchSession(targetPath);
+          } else {
+            // Fallback: tell user to use the command
+            ctx.ui.notify(`Use /sessions to switch sessions`, "warning");
+          }
         }
       });
     },
@@ -971,21 +1003,15 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Handle delegated switch from shortcut
+      // Handle direct switch
       if (args.startsWith("--switch ")) {
         const path = args.slice("--switch ".length).trim();
         await ctx.switchSession(path);
         return;
       }
 
-      await dashboardLoop(ctx.ui, async (result) => {
-        if (result.type === "create") {
-          const filePath = await createSessionInDir(result.cwd, result.name);
-          ctx.ui.notify(`Session created for ${result.project}`, "info");
-          await ctx.switchSession(filePath);
-        } else if (result.type === "open") {
-          await ctx.switchSession(result.sessionPath);
-        }
+      await runDashboard(ctx.ui, async (path) => {
+        await ctx.switchSession(path);
       });
     },
   });

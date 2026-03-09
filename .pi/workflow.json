@@ -6,7 +6,7 @@
     "targetBranch": "main",
     "ticketRequired": false,
     "ticketPlatform": "none",
-    "platform": "none",
+    "platform": "github",
     "prDescriptionLanguage": "en",
     "coAuthoredBy": false,
     "branchFormat": "${type}/${description}",
